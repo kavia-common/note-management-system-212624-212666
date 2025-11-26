@@ -36,74 +36,69 @@ else:
 
 # Connect and enable foreign keys
 with closing(sqlite3.connect(DB_NAME)) as conn:
-    conn.isolation_level = None  # allow executing PRAGMA reliably
-    with closing(conn.cursor()) as cursor:
-        # Enable foreign keys (requirement 1)
-        cursor.execute("PRAGMA foreign_keys = ON")
+    # Use transaction context manager: commits on success, rolls back on exception
+    with conn:
+        with closing(conn.cursor()) as cursor:
+            # Enable foreign keys (requirement 1)
+            cursor.execute("PRAGMA foreign_keys = ON")
 
-        # Begin transaction for schema operations
-        cursor.execute("BEGIN")
-
-        # Keep existing behavior: create initial schema tables
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS app_info (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                key TEXT UNIQUE NOT NULL,
-                value TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        # Upsert initial data for app_info (existing behavior)
-        cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
-                       ("project_name", "notes_database"))
-        cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
-                       ("version", "0.1.0"))
-        cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
-                       ("author", "John Doe"))
-        cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
-                       ("description", ""))
-
-        # Requirement 2: detect notes table and run migration if missing
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'")
-        notes_exists = cursor.fetchone() is not None
-
-        created_notes = False
-        if not notes_exists:
-            # Read and execute migration file
-            try:
-                with open(NOTES_MIGRATION_FILE, "r", encoding="utf-8") as f:
-                    migration_sql = f.read()
-                # executescript supports multiple statements
-                conn.executescript(migration_sql)
-                created_notes = True
-            except FileNotFoundError:
-                # Surface a clear error to help future debugging
-                raise FileNotFoundError(
-                    f"Required migration not found: {NOTES_MIGRATION_FILE}"
+            # Keep existing behavior: create initial schema tables
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS app_info (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key TEXT UNIQUE NOT NULL,
+                    value TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        # Commit schema and seed updates
-        cursor.execute("COMMIT")
+            # Upsert initial data for app_info (existing behavior)
+            cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
+                           ("project_name", "notes_database"))
+            cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
+                           ("version", "0.1.0"))
+            cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
+                           ("author", "John Doe"))
+            cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
+                           ("description", ""))
 
-        # Gather stats for concise status output
-        cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        table_count = cursor.fetchone()[0] or 0
+            # Requirement 2: detect notes table and run migration if missing
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'")
+            notes_exists = cursor.fetchone() is not None
 
-        # app_info count (best effort)
-        try:
-            cursor.execute("SELECT COUNT(*) FROM app_info")
-            record_count = cursor.fetchone()[0] or 0
-        except sqlite3.Error:
-            record_count = 0
+            created_notes = False
+            if not notes_exists:
+                # Read and execute migration file
+                try:
+                    with open(NOTES_MIGRATION_FILE, "r", encoding="utf-8") as f:
+                        migration_sql = f.read()
+                    # executescript supports multiple statements
+                    conn.executescript(migration_sql)
+                    created_notes = True
+                except FileNotFoundError:
+                    # Surface a clear error to help future debugging
+                    raise FileNotFoundError(
+                        f"Required migration not found: {NOTES_MIGRATION_FILE}"
+                    )
+
+            # Gather stats for concise status output
+            cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            table_count = cursor.fetchone()[0] or 0
+
+            # app_info count (best effort)
+            try:
+                cursor.execute("SELECT COUNT(*) FROM app_info")
+                record_count = cursor.fetchone()[0] or 0
+            except sqlite3.Error:
+                record_count = 0
 
 # Save connection information to a file
 current_dir = os.getcwd()
@@ -140,7 +135,7 @@ status_parts.append("SQLite setup complete")
 status_parts.append(f"DB={DB_NAME}")
 status_parts.append(f"tables={table_count}")
 status_parts.append(f"app_info_records={record_count}")
-status_parts.append("notes_table=" + ("created" if not db_exists and created_notes or (created_notes) else "ready"))
+status_parts.append("notes_table=" + ("created" if created_notes else "ready"))
 
 print(" | ".join(status_parts))
 print(f"Location: {current_dir}/{DB_NAME}")
