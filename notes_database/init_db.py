@@ -1,75 +1,109 @@
 #!/usr/bin/env python3
-"""Initialize SQLite database for notes_database"""
+"""Initialize SQLite database for notes_database
+
+This script initializes the local SQLite database with base tables and idempotently
+ensures the notes table exists using a SQL migration. It:
+- Enables PRAGMA foreign_keys=ON
+- Creates base tables (existing behavior: app_info, users)
+- Applies migrations/001_create_notes.sql if notes table is missing
+- Writes connection helper files
+- Prints a concise end status
+"""
 
 import sqlite3
 import os
+from contextlib import closing
 
 DB_NAME = "myapp.db"
 DB_USER = "kaviasqlite"  # Not used for SQLite, but kept for consistency
 DB_PASSWORD = "kaviadefaultpassword"  # Not used for SQLite, but kept for consistency
 DB_PORT = "5000"  # Not used for SQLite, but kept for consistency
 
+MIGRATIONS_DIR = "migrations"
+NOTES_MIGRATION_FILE = os.path.join(MIGRATIONS_DIR, "001_create_notes.sql")
+
 print("Starting SQLite setup...")
+
+# Ensure migrations directory exists (non-fatal if already present)
+os.makedirs(MIGRATIONS_DIR, exist_ok=True)
 
 # Check if database already exists
 db_exists = os.path.exists(DB_NAME)
 if db_exists:
     print(f"SQLite database already exists at {DB_NAME}")
-    # Verify it's accessible
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        conn.execute("SELECT 1")
-        conn.close()
-        print("Database is accessible and working.")
-    except Exception as e:
-        print(f"Warning: Database exists but may be corrupted: {e}")
 else:
     print("Creating new SQLite database...")
 
-# Create database with sample tables
-conn = sqlite3.connect(DB_NAME)
-cursor = conn.cursor()
+# Connect and enable foreign keys
+with closing(sqlite3.connect(DB_NAME)) as conn:
+    conn.isolation_level = None  # allow executing PRAGMA reliably
+    with closing(conn.cursor()) as cursor:
+        # Enable foreign keys (requirement 1)
+        cursor.execute("PRAGMA foreign_keys = ON")
 
-# Create initial schema
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS app_info (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT UNIQUE NOT NULL,
-        value TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-""")
+        # Begin transaction for schema operations
+        cursor.execute("BEGIN")
 
-# Create a sample users table as an example
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-""")
+        # Keep existing behavior: create initial schema tables
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT UNIQUE NOT NULL,
+                value TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-# Insert initial data
-cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)", 
-               ("project_name", "notes_database"))
-cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)", 
-               ("version", "0.1.0"))
-cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)", 
-               ("author", "John Doe"))
-cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)", 
-               ("description", ""))
+        # Upsert initial data for app_info (existing behavior)
+        cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
+                       ("project_name", "notes_database"))
+        cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
+                       ("version", "0.1.0"))
+        cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
+                       ("author", "John Doe"))
+        cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)",
+                       ("description", ""))
 
-conn.commit()
+        # Requirement 2: detect notes table and run migration if missing
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'")
+        notes_exists = cursor.fetchone() is not None
 
-# Get database statistics
-cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-table_count = cursor.fetchone()[0]
+        created_notes = False
+        if not notes_exists:
+            # Read and execute migration file
+            try:
+                with open(NOTES_MIGRATION_FILE, "r", encoding="utf-8") as f:
+                    migration_sql = f.read()
+                # executescript supports multiple statements
+                conn.executescript(migration_sql)
+                created_notes = True
+            except FileNotFoundError:
+                # Surface a clear error to help future debugging
+                raise FileNotFoundError(
+                    f"Required migration not found: {NOTES_MIGRATION_FILE}"
+                )
 
-cursor.execute("SELECT COUNT(*) FROM app_info")
-record_count = cursor.fetchone()[0]
+        # Commit schema and seed updates
+        cursor.execute("COMMIT")
 
-conn.close()
+        # Gather stats for concise status output
+        cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        table_count = cursor.fetchone()[0] or 0
+
+        # app_info count (best effort)
+        try:
+            cursor.execute("SELECT COUNT(*) FROM app_info")
+            record_count = cursor.fetchone()[0] or 0
+        except sqlite3.Error:
+            record_count = 0
 
 # Save connection information to a file
 current_dir = os.getcwd()
@@ -96,37 +130,18 @@ if not os.path.exists("db_visualizer"):
 try:
     with open("db_visualizer/sqlite.env", "w") as f:
         f.write(f"export SQLITE_DB=\"{db_path}\"\n")
-    print(f"Environment variables saved to db_visualizer/sqlite.env")
+    print("Environment variables saved to db_visualizer/sqlite.env")
 except Exception as e:
     print(f"Warning: Could not save environment variables: {e}")
 
-print("\nSQLite setup complete!")
-print(f"Database: {DB_NAME}")
+# Concise final status message (requirement 4)
+status_parts = []
+status_parts.append("SQLite setup complete")
+status_parts.append(f"DB={DB_NAME}")
+status_parts.append(f"tables={table_count}")
+status_parts.append(f"app_info_records={record_count}")
+status_parts.append("notes_table=" + ("created" if not db_exists and created_notes or (created_notes) else "ready"))
+
+print(" | ".join(status_parts))
 print(f"Location: {current_dir}/{DB_NAME}")
-print("")
-
-print("To use with Node.js viewer, run: source db_visualizer/sqlite.env")
-
-print("\nTo connect to the database, use one of the following methods:")
-print(f"1. Python: sqlite3.connect('{DB_NAME}')")
-print(f"2. Connection string: {connection_string}")
-print(f"3. Direct file access: {current_dir}/{DB_NAME}")
-print("")
-
-print("Database statistics:")
-print(f"  Tables: {table_count}")
-print(f"  App info records: {record_count}")
-
-# If sqlite3 CLI is available, show how to use it
-try:
-    import subprocess
-    result = subprocess.run(['which', 'sqlite3'], capture_output=True, text=True)
-    if result.returncode == 0:
-        print("")
-        print("SQLite CLI is available. You can also use:")
-        print(f"  sqlite3 {DB_NAME}")
-except:
-    pass
-
-# Exit successfully
-print("\nScript completed successfully.")
+print(f"Connect: sqlite3 {DB_NAME}")
